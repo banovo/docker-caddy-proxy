@@ -1,0 +1,63 @@
+{{ $CurrentContainer := where $ "ID" .Docker.CurrentContainerID | first }}
+
+# template proxy_vhost
+{{ define "proxy_vhost" }}
+	{{ if .Address }}
+		{{ if and .Container.Node.ID .Address.HostPort }}
+			# If we got the containers from swarm and this container's port is published to host, use host IP:PORT
+			# {{ .Container.Node.Name }}/{{ .Container.Name }}
+			proxy / {{ .Container.Node.Address.IP }}:{{ .Address.HostPort }} {
+				transparent
+			}
+		{{ else if .Network }}
+			# If there is no swarm node or the port is not published on host, use container's IP:PORT
+			# {{ .Container.Name }}
+			proxy / {{ .Network.IP }}:{{ .Address.Port }} {
+				transparent
+			}
+		{{ end }}
+	{{ else if .Network }}
+		# Fallback to IP:80
+		# {{ .Container.Name }}
+		proxy / {{ .Network.IP }} {
+			transparent
+		}
+	{{ end }}
+{{ end }}
+
+{{ range $host, $containers := groupByMulti $ "Env.VIRTUAL_HOST" "," }}
+{{ $host }} {
+{{ range $container := $containers }}
+	{{ $addrLen := len $container.Addresses }}
+	{{ range $knownNetwork := $CurrentContainer.Networks }}
+		{{ range $containerNetwork := $container.Networks }}
+			{{ if eq $knownNetwork.Name $containerNetwork.Name }}
+				## Can be connect with "{{ $containerNetwork.Name }}" network
+
+				{{ $basicauth := $container.Env.VIRTUAL_HOST_BASIC_AUTH }}
+				{{ if $basicauth }}
+					basicauth {{ $basicauth }}
+				{{ end }}
+
+				{{/* If only 1 port exposed, use that */}}
+				{{ if eq $addrLen 1 }}
+					{{ $address := index $container.Addresses 0 }}
+					{{ template "upstream" (dict "Container" $container "Address" $address "Network" $containerNetwork) }}
+				{{/* If more than one port exposed, use the one matching VIRTUAL_PORT env var, falling back to standard web port 80 */}}
+				{{ else }}
+					{{ $port := coalesce $container.Env.VIRTUAL_PORT "80" }}
+					{{ $address := where $container.Addresses "Port" $port | first }}
+					{{ template "upstream" (dict "Container" $container "Address" $address "Network" $containerNetwork) }}
+				{{ end }}
+
+				{{ $extraconfig := $container.Env.VIRTUAL_HOST_EXTRA_CONFIG }}
+				{{ if $extraconfig }}
+					{{ $extraconfig }}
+				{{ end }}
+			{{ end }}
+		{{ end }}
+	{{ end }}
+{{ end }}
+	log stdout
+	errors stdout
+}
